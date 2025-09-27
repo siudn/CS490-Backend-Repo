@@ -107,6 +107,22 @@ def search():
     cur.close(); conn.close()
     return jsonify(rows)
 
+@app.get("/api/customers")
+def customers():
+    from flask import request, jsonify
+    page = int(request.args.get("page", 1))
+    limit = int(request.args.get("limit", 20))
+    offset = (page - 1) * limit
+    sql = """
+      SELECT customer_id, first_name, last_name, email, active
+      FROM customer
+      ORDER BY last_name, first_name
+      LIMIT %s OFFSET %s
+    """
+    conn = db(); cur = conn.cursor(dictionary=True)
+    cur.execute(sql, (limit, offset)); rows = cur.fetchall()
+    cur.close(); conn.close()
+    return jsonify({"data": rows, "page": page, "limit": limit})
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
