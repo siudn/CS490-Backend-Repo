@@ -109,20 +109,64 @@ def search():
 
 @app.get("/api/customers")
 def customers():
-    from flask import request, jsonify
     page = int(request.args.get("page", 1))
     limit = int(request.args.get("limit", 20))
+    q = (request.args.get("q") or "").strip()
     offset = (page - 1) * limit
-    sql = """
+
+    base = """
       SELECT customer_id, first_name, last_name, email, active
       FROM customer
-      ORDER BY last_name, first_name
-      LIMIT %s OFFSET %s
     """
+    where = ""
+    params = []
+    if q:
+        if q.isdigit():
+            where = " WHERE customer_id = %s OR first_name LIKE %s OR last_name LIKE %s "
+            params = [int(q), f"%{q}%", f"%{q}%"]
+        else:
+            where = " WHERE first_name LIKE %s OR last_name LIKE %s "
+            params = [f"%{q}%", f"%{q}%"]
+
+    sql = base + where + " ORDER BY last_name, first_name LIMIT %s OFFSET %s"
+    params += [limit, offset]
+
     conn = db(); cur = conn.cursor(dictionary=True)
-    cur.execute(sql, (limit, offset)); rows = cur.fetchall()
+    cur.execute(sql, params); rows = cur.fetchall()
     cur.close(); conn.close()
-    return jsonify({"data": rows, "page": page, "limit": limit})
+    return jsonify({"data": rows, "page": page, "limit": limit, "q": q})
+
+@app.post("/api/rent")
+def rent_film():
+    data = request.get_json(force=True)
+    film_id = int(data.get("film_id"))
+    customer_id = int(data.get("customer_id"))
+    staff_id = 1
+    conn = db(); cur = conn.cursor(dictionary=True)
+
+    cur.execute("""
+      SELECT i.inventory_id
+      FROM inventory i
+      LEFT JOIN rental r
+        ON r.inventory_id = i.inventory_id AND r.return_date IS NULL
+      WHERE i.film_id = %s AND r.rental_id IS NULL
+      LIMIT 1
+    """, (film_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return jsonify({"error":"No available copies to rent"}), 409
+
+    inventory_id = row["inventory_id"]
+
+    cur.execute("""
+      INSERT INTO rental (rental_date, inventory_id, customer_id, return_date, staff_id, last_update)
+      VALUES (NOW(), %s, %s, NULL, %s, NOW())
+    """, (inventory_id, customer_id, staff_id))
+    conn.commit()
+    rental_id = cur.lastrowid
+    cur.close(); conn.close()
+    return jsonify({"rental_id": rental_id, "inventory_id": inventory_id}), 201
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
