@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
+import mysql.connector as mc
+import os
 from flask_cors import CORS
-import os, mysql.connector as mc
 
 app = Flask(__name__)
 CORS(app)
@@ -12,6 +13,20 @@ def db():
         password=os.getenv("DB_PASS",""),
         database=os.getenv("DB_NAME","sakila")
     )
+
+def ensure_city(conn, city: str, country_id: int) -> int:
+    cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT city_id FROM city WHERE city=%s AND country_id=%s LIMIT 1", (city, country_id))
+    row = cur.fetchone()
+    if row: 
+        cur.close(); 
+        return row["city_id"]
+    cur2 = conn.cursor()
+    cur2.execute("INSERT INTO city (city, country_id, last_update) VALUES (%s,%s,NOW())", (city, country_id))
+    conn.commit()
+    cid = cur2.lastrowid
+    cur.close(); cur2.close()
+    return cid
 
 @app.get("/api/films/top")
 def top_films():
@@ -167,6 +182,97 @@ def rent_film():
     rental_id = cur.lastrowid
     cur.close(); conn.close()
     return jsonify({"rental_id": rental_id, "inventory_id": inventory_id}), 201
+
+@app.get("/api/countries")
+def countries():
+    conn = db(); cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT country_id, country FROM country ORDER BY country")
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return jsonify(rows)
+
+@app.get("/api/customers/<int:customer_id>")
+def get_customer(customer_id):
+    sql = """
+    SELECT c.customer_id, c.first_name, c.last_name, c.email, c.active,
+           a.address_id, a.address, a.address2, a.district, a.postal_code, a.phone,
+           ci.city_id, ci.city, co.country_id, co.country
+    FROM customer c
+    JOIN address a ON a.address_id = c.address_id
+    JOIN city ci ON ci.city_id = a.city_id
+    JOIN country co ON co.country_id = ci.country_id
+    WHERE c.customer_id=%s
+    """
+    conn=db(); cur=conn.cursor(dictionary=True)
+    cur.execute(sql,(customer_id,))
+    row=cur.fetchone()
+    cur.close(); conn.close()
+    return (jsonify(row),200) if row else (jsonify({"error":"Not found"}),404)
+
+@app.post("/api/customers")
+def add_customer():
+    d = request.get_json(force=True)
+    conn=db()
+    try:
+        city_id = int(d["city_id"]) if d.get("city_id") else ensure_city(conn, d["city"], int(d["country_id"]))
+        cur = conn.cursor()
+        cur.execute("""
+          INSERT INTO address(address,address2,district,city_id,postal_code,phone,location,last_update)
+          VALUES (%s,%s,%s,%s,%s,%s,POINT(0,0),NOW())
+        """, (d["address"], d.get("address2",""), d["district"], city_id, d.get("postal_code",""), d.get("phone","")))
+        addr_id = cur.lastrowid
+
+        cur.execute("""
+          INSERT INTO customer(store_id,first_name,last_name,email,address_id,active,last_update)
+          VALUES (%s,%s,%s,%s,%s,1,NOW())
+        """, (int(d.get("store_id",1)), d["first_name"], d["last_name"], d.get("email",""), addr_id))
+        conn.commit()
+        return jsonify({"customer_id": cur.lastrowid, "address_id": addr_id}), 201
+    finally:
+        conn.close()
+
+@app.put("/api/customers/<int:customer_id>")
+def update_customer(customer_id):
+    d = request.get_json(force=True)
+    conn=db(); cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT address_id FROM customer WHERE customer_id=%s",(customer_id,))
+        row = cur.fetchone()
+        if not row: return jsonify({"error":"Not found"}),404
+        addr_id = row["address_id"]
+
+        # city (existing or create)
+        city_id = int(d["city_id"]) if d.get("city_id") else ensure_city(conn, d["city"], int(d["country_id"]))
+
+        cur2 = conn.cursor()
+        cur2.execute("""
+          UPDATE customer
+          SET first_name=%s,last_name=%s,email=%s,active=%s,last_update=NOW()
+          WHERE customer_id=%s
+        """, (d["first_name"], d["last_name"], d.get("email",""), int(d.get("active",1)), customer_id))
+        cur2.execute("""
+          UPDATE address
+          SET address=%s,address2=%s,district=%s,city_id=%s,postal_code=%s,phone=%s,last_update=NOW()
+          WHERE address_id=%s
+        """, (d["address"], d.get("address2",""), d["district"], city_id, d.get("postal_code",""), d.get("phone",""), addr_id))
+        conn.commit()
+        cur2.close()
+        return jsonify({"message":"updated"})
+    finally:
+        cur.close(); conn.close()
+
+@app.delete("/api/customers/<int:customer_id>")
+def delete_customer(customer_id):
+    conn=db(); cur=conn.cursor()
+    try:
+        cur.execute("START TRANSACTION")
+        cur.execute("DELETE FROM payment WHERE customer_id=%s",(customer_id,))
+        cur.execute("DELETE FROM rental  WHERE customer_id=%s",(customer_id,))
+        cur.execute("DELETE FROM customer WHERE customer_id=%s",(customer_id,))
+        conn.commit()
+        return jsonify({"message":"deleted"})
+    finally:
+        cur.close(); conn.close()
 
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
