@@ -274,5 +274,39 @@ def delete_customer(customer_id):
     finally:
         cur.close(); conn.close()
 
+@app.get("/api/customers/<int:customer_id>/rentals")
+def customer_rentals(customer_id):
+    sql = """
+    SELECT r.rental_id, r.rental_date, r.return_date,
+           f.film_id, f.title
+    FROM rental r
+    JOIN inventory i ON i.inventory_id = r.inventory_id
+    JOIN film f      ON f.film_id = i.film_id
+    WHERE r.customer_id = %s
+    ORDER BY r.rental_date DESC
+    """
+    conn=db(); cur=conn.cursor(dictionary=True)
+    cur.execute(sql, (customer_id,))
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    open_rentals = [x for x in rows if x["return_date"] is None]
+    returned     = [x for x in rows if x["return_date"] is not None]
+    return jsonify({"open": open_rentals, "returned": returned})
+
+@app.post("/api/rentals/<int:rental_id>/return")
+def mark_returned(rental_id):
+    conn=db(); cur=conn.cursor()
+    cur.execute("""
+        UPDATE rental
+        SET return_date = NOW()
+        WHERE rental_id = %s AND return_date IS NULL
+    """, (rental_id,))
+    conn.commit()
+    changed = cur.rowcount
+    cur.close(); conn.close()
+    if changed == 0:
+        return jsonify({"message":"No open rental found for this id"}), 404
+    return jsonify({"message":"Rental marked returned", "rental_id": rental_id})
+
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
