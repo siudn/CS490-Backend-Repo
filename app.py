@@ -124,32 +124,48 @@ def search():
 
 @app.get("/api/customers")
 def customers():
+    q = (request.args.get("q") or "").strip()
     page = int(request.args.get("page", 1))
     limit = int(request.args.get("limit", 20))
-    q = (request.args.get("q") or "").strip()
     offset = (page - 1) * limit
 
     base = """
-      SELECT customer_id, first_name, last_name, email, active
-      FROM customer
+      SELECT c.customer_id, c.first_name, c.last_name, c.email, c.active
+      FROM customer c
     """
-    where = ""
+    where = []
     params = []
+
     if q:
         if q.isdigit():
-            where = " WHERE customer_id = %s OR first_name LIKE %s OR last_name LIKE %s "
-            params = [int(q), f"%{q}%", f"%{q}%"]
-        else:
-            where = " WHERE first_name LIKE %s OR last_name LIKE %s "
-            params = [f"%{q}%", f"%{q}%"]
+            where.append("c.customer_id = %s")
+            params.append(int(q))
 
-    sql = base + where + " ORDER BY last_name, first_name LIMIT %s OFFSET %s"
-    params += [limit, offset]
+        where.append("c.first_name LIKE %s")
+        params.append(f"%{q}%")
+        where.append("c.last_name LIKE %s")
+        params.append(f"%{q}%")
+
+        where.append("CONCAT_WS(' ', c.first_name, c.last_name) LIKE %s")
+        params.append(f"%{q}%")
+        where.append("CONCAT_WS(' ', c.last_name, c.first_name) LIKE %s")
+        params.append(f"%{q}%")
+
+        parts = q.split()
+        if len(parts) == 2:
+            where.append("(c.first_name LIKE %s AND c.last_name LIKE %s)")
+            params.extend([f"%{parts[0]}%", f"%{parts[1]}%"])
+
+    sql = base
+    if where:
+        sql += " WHERE " + " OR ".join(f"({w})" for w in where)
+    sql += " ORDER BY c.last_name, c.first_name LIMIT %s OFFSET %s"
 
     conn = db(); cur = conn.cursor(dictionary=True)
-    cur.execute(sql, params); rows = cur.fetchall()
+    cur.execute(sql, (*params, limit, offset))
+    rows = cur.fetchall()
     cur.close(); conn.close()
-    return jsonify({"data": rows, "page": page, "limit": limit, "q": q})
+    return jsonify({"data": rows, "page": page, "limit": limit})
 
 @app.post("/api/rent")
 def rent_film():
